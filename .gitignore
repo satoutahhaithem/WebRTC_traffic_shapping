@@ -1,0 +1,18 @@
+# Ignore the video directory
+video/
+
+# Ignore Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore log files
+logs/
+*.log
+
+# Ignore performance graphs
+tc_performance_graphs/
+*.png
+*.csv
