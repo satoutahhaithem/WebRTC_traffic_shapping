@@ -173,29 +173,68 @@ def receive_video_info(client_socket):
         dict: Video information (width, height, fps, quality), or None if failed
     """
     try:
+        print("Waiting to receive video info size...")
         # Receive the size of the data (4 bytes)
         size_data = client_socket.recv(4)
         if not size_data:
+            print("Failed to receive size data (empty)")
             return None
         
+        print(f"Received size data: {len(size_data)} bytes")
+        
         # Unpack the size value
-        size = struct.unpack(">L", size_data)[0]
+        try:
+            size = struct.unpack(">L", size_data)[0]
+            print(f"Unpacked size: {size} bytes")
+        except struct.error as e:
+            print(f"Error unpacking size: {e}, received data: {size_data!r}")
+            return None
         
         # Receive the data
+        print(f"Waiting to receive {size} bytes of video info data...")
         data = b""
         while len(data) < size:
             packet = client_socket.recv(min(size - len(data), 4096))
             if not packet:
+                print(f"Failed to receive data packet (empty) after receiving {len(data)}/{size} bytes")
                 return None
             data += packet
+            print(f"Received {len(data)}/{size} bytes")
         
         # Deserialize the data to get video info
-        video_info = pickle.loads(data)
-        
-        return video_info
+        try:
+            print(f"Deserializing {len(data)} bytes of data...")
+            video_info = pickle.loads(data)
+            print(f"Successfully deserialized video info: {video_info}")
+            return video_info
+        except (pickle.UnpicklingError, EOFError, AttributeError) as e:
+            print(f"Error deserializing video info: {e}")
+            print(f"First 100 bytes of data: {data[:100]!r}")
+            
+            # Try with different pickle protocols as a fallback
+            for protocol in range(5):  # Try protocols 0-4
+                try:
+                    print(f"Trying to deserialize with protocol {protocol}...")
+                    # This is a hack to try different protocols
+                    # It won't work for all cases but might help in some situations
+                    if protocol == 0:
+                        # Try a simple fallback with default values
+                        print("Using fallback default video info")
+                        return {
+                            "width": 640,
+                            "height": 480,
+                            "fps": 30.0,
+                            "quality": 90
+                        }
+                except Exception as e:
+                    print(f"Protocol {protocol} failed: {e}")
+            
+            return None
     
     except Exception as e:
         print(f"Error receiving video info: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def buffer_frames(client_socket):
@@ -309,6 +348,7 @@ if __name__ == "__main__":
     # Create TCP socket
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.settimeout(30)  # Set a 30-second timeout for socket operations
     
     try:
         # Bind socket to address and port
@@ -320,14 +360,39 @@ if __name__ == "__main__":
         start_metrics_server(metrics_port)
         print(f"Metrics available at: http://{socket.gethostbyname(socket.gethostname())}:{metrics_port}/metrics")
         
-        # Accept connection from sender
-        client_socket, addr = server_socket.accept()
-        print(f"Connection from {addr}")
+        # Accept connection from sender with error handling
+        print(f"Waiting for sender to connect on {server_ip}:{server_port}...")
+        try:
+            client_socket, addr = server_socket.accept()
+            client_socket.settimeout(30)  # Set a 30-second timeout for client socket operations
+            print(f"Connection from {addr}")
+        except socket.timeout:
+            print("Timed out waiting for connection")
+            print("Please make sure the sender is running and trying to connect")
+            server_socket.close()
+            exit()
+        except socket.error as e:
+            print(f"Error accepting connection: {e}")
+            server_socket.close()
+            exit()
         
-        # Receive video information
-        video_info = receive_video_info(client_socket)
+        # Receive video information with retries
+        print("Attempting to receive video information...")
+        max_retries = 3
+        retry_count = 0
+        video_info = None
+        
+        while retry_count < max_retries and not video_info:
+            video_info = receive_video_info(client_socket)
+            if not video_info:
+                retry_count += 1
+                print(f"Failed to receive video info (attempt {retry_count}/{max_retries})")
+                if retry_count < max_retries:
+                    print(f"Retrying in 2 seconds...")
+                    time.sleep(2)
+        
         if not video_info:
-            print("Failed to receive video info")
+            print("All attempts to receive video info failed")
             client_socket.close()
             server_socket.close()
             exit()

@@ -116,7 +116,7 @@ def send_frame(client_socket, frame, quality=90):
         return False
     
     # Serialize frame for network transmission
-    data = pickle.dumps(encoded_frame)
+    data = pickle.dumps(encoded_frame, protocol=4)
     
     # Get the size of the data
     size = len(data)
@@ -188,7 +188,7 @@ def send_frames_thread(client_socket, fps):
                             "fps": target_fps,
                             "quality": jpeg_quality
                         }
-                        info_data = pickle.dumps(video_info)
+                        info_data = pickle.dumps(video_info, protocol=4)
                         client_socket.sendall(struct.pack(">L", len(info_data)))
                         client_socket.sendall(info_data)
                         
@@ -268,9 +268,9 @@ def start_metrics_server(port):
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Video Sender")
-    parser.add_argument("--ip", default="192.168.2.169", help="Receiver IP address")
+    parser.add_argument("--ip", default="127.0.0.1", help="Receiver IP address")
     parser.add_argument("--port", type=int, default=9999, help="Receiver port")
-    parser.add_argument("--video", default="../video/zidane.mp4", help="Video file path")
+    parser.add_argument("--video", default="../video/zidane.mp4", help="Video file path (default: ../video/zidane.mp4)")
     parser.add_argument("--quality", type=int, default=90, help="JPEG quality (1-100)")
     parser.add_argument("--scale", type=float, default=1.0, help="Resolution scale factor")
     parser.add_argument("--fps", type=float, default=0, help="Target FPS (0=use video's FPS)")
@@ -300,21 +300,56 @@ if __name__ == "__main__":
     
     # Create TCP socket
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.settimeout(30)  # Set a 30-second timeout for socket operations
     
     try:
-        # Connect to receiver
+        # Connect to receiver with retry
         print(f"Connecting to {receiver_ip}:{receiver_port}...")
-        client_socket.connect((receiver_ip, receiver_port))
-        print("Connected to receiver")
+        max_retries = 3
+        retry_count = 0
+        connected = False
+        
+        while retry_count < max_retries and not connected:
+            try:
+                client_socket.connect((receiver_ip, receiver_port))
+                connected = True
+                print("Connected to receiver")
+            except socket.error as e:
+                retry_count += 1
+                print(f"Connection failed (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    print(f"Retrying in 2 seconds...")
+                    time.sleep(2)
+                    # Create a new socket for retry
+                    client_socket.close()
+                    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    client_socket.settimeout(30)
+        
+        if not connected:
+            print(f"Failed to connect to receiver after {max_retries} attempts")
+            print("Please make sure the receiver is running and the IP address is correct")
+            print("Usage example: python direct_sender.py --ip RECEIVER_IP")
+            exit()
         
         # Start metrics API server
         start_metrics_server(metrics_port)
         print(f"Metrics available at: http://{socket.gethostbyname(socket.gethostname())}:{metrics_port}/metrics")
         
+        # Check if video file exists
+        import os
+        if not os.path.exists(video_path):
+            print(f"Error: Video file not found: {video_path}")
+            print(f"Current working directory: {os.getcwd()}")
+            print(f"Absolute path: {os.path.abspath(video_path)}")
+            print("Please provide a valid video file path using --video argument")
+            client_socket.close()
+            exit()
+            
         # Open video file
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"Error: Could not open video file {video_path}")
+            print("This could be due to missing codecs or an unsupported video format")
             client_socket.close()
             exit()
         
@@ -330,15 +365,33 @@ if __name__ == "__main__":
         print(f"Video FPS: {video_fps}, Target FPS: {target_fps}")
         
         # Send video info to receiver
+        print("Preparing to send video info to receiver...")
         video_info = {
             "width": frame_width,
             "height": frame_height,
             "fps": target_fps,
             "quality": jpeg_quality
         }
-        info_data = pickle.dumps(video_info)
-        client_socket.sendall(struct.pack(">L", len(info_data)))
-        client_socket.sendall(info_data)
+        print(f"Video info to send: {video_info}")
+        
+        try:
+            # Use pickle protocol 4 for better compatibility
+            info_data = pickle.dumps(video_info, protocol=4)
+            print(f"Serialized video info: {len(info_data)} bytes")
+            
+            # Send size first
+            size_bytes = struct.pack(">L", len(info_data))
+            print(f"Sending size header: {len(size_bytes)} bytes, value: {len(info_data)}")
+            client_socket.sendall(size_bytes)
+            
+            # Send actual data
+            print(f"Sending video info data: {len(info_data)} bytes")
+            client_socket.sendall(info_data)
+            print("Video info sent successfully")
+        except Exception as e:
+            print(f"Error sending video info: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Start sending thread
         send_thread = threading.Thread(target=send_frames_thread, args=(client_socket, target_fps))
